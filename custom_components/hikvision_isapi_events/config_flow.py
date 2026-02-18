@@ -12,7 +12,6 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_DEFAULT_OFF_DELAY_SECONDS,
-    CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES,
     CONF_RECONNECT_DELAY_SECONDS,
     CONF_USE_SSL,
     DEFAULT_OFF_DELAY_SECONDS,
@@ -26,40 +25,16 @@ from .const import (
 from .isapi_client import HikvisionIsapiClient
 
 
-def _validate_overrides(raw: str) -> bool:
-    for idx, line in enumerate(raw.splitlines(), start=1):
-        line = line.strip()
-        if not line:
-            continue
-        if "=" not in line:
-            raise ValueError(f"line_{idx}")
-        left, right = line.split("=", 1)
-        try:
-            _channel_id = int(left.strip())
-            seconds = int(right.strip())
-        except ValueError as err:
-            raise ValueError(f"line_{idx}") from err
-        if seconds < MIN_OFF_DELAY_SECONDS or seconds > MAX_OFF_DELAY_SECONDS:
-            raise ValueError(f"line_{idx}")
-    return True
-
-
 class HikvisionIsapiEventsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Hikvision ISAPI Events."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
         """Handle user step."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            overrides = user_input.get(CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES, "")
-            try:
-                _validate_overrides(overrides)
-            except ValueError:
-                errors[CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES] = "invalid_override_format"
-
             default_delay = user_input[CONF_DEFAULT_OFF_DELAY_SECONDS]
             if default_delay < MIN_OFF_DELAY_SECONDS or default_delay > MAX_OFF_DELAY_SECONDS:
                 errors[CONF_DEFAULT_OFF_DELAY_SECONDS] = "invalid_delay"
@@ -105,7 +80,6 @@ class HikvisionIsapiEventsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_DEFAULT_OFF_DELAY_SECONDS,
                         default=DEFAULT_OFF_DELAY_SECONDS,
                     ): vol.All(int, vol.Range(min=MIN_OFF_DELAY_SECONDS, max=MAX_OFF_DELAY_SECONDS)),
-                    vol.Optional(CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES, default=""): str,
                     vol.Required(
                         CONF_RECONNECT_DELAY_SECONDS,
                         default=DEFAULT_RECONNECT_DELAY_SECONDS,

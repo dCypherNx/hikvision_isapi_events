@@ -11,25 +11,27 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
-    ATTR_LAST_EVENT_DATETIME,
-    ATTR_LAST_EVENT_STATE,
-    ATTR_LAST_EVENT_TYPE,
-    ATTR_LAST_TARGET_TYPE,
     CONF_DEFAULT_OFF_DELAY_SECONDS,
     CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES,
     CONF_RECONNECT_DELAY_SECONDS,
     CONF_USE_SSL,
     DATA_RUNTIME,
+    DEFAULT_OFF_DELAY_SECONDS,
     DEFAULT_RECONNECT_DELAY_SECONDS,
     DOMAIN,
+    DVR_DEVICE_KEY,
     EVENT_TYPE_VMD,
+    MAX_OFF_DELAY_SECONDS,
+    MIN_OFF_DELAY_SECONDS,
     PLATFORMS,
 )
 from .discovery import discover_channels
 from .isapi_client import HikvisionIsapiClient
+from .storage import HikvisionChannelTimeoutStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,18 +51,35 @@ class ChannelState:
     off_timer: asyncio.TimerHandle | None = None
 
 
-class HikvisionEventHub:
-    """Central state/event hub consumed by entities."""
+class ChannelManager:
+    """Central state/event manager consumed by entities."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        timeout_store: HikvisionChannelTimeoutStore,
+        initial_timeouts: dict[int, int],
+    ) -> None:
         self.hass = hass
         self.entry = entry
+        self._timeout_store = timeout_store
         self._states: dict[int, ChannelState] = {}
         self._entity_listeners: list[Callable[[int], None]] = []
         self._channel_listeners: list[Callable[[int], None]] = []
-        self._off_delays = _parse_overrides(
-            entry.data.get(CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES, "")
-        )
+        self._timeouts = {
+            channel_id: self._clamp_timeout(seconds)
+            for channel_id, seconds in initial_timeouts.items()
+        }
+
+    @property
+    def dvr_identifier(self) -> tuple[str, str, str]:
+        """Return parent DVR device identifier tuple."""
+        return (DOMAIN, self.entry.entry_id, DVR_DEVICE_KEY)
+
+    def channel_identifier(self, channel_id: int) -> tuple[str, str, str]:
+        """Return channel device identifier tuple."""
+        return (DOMAIN, self.entry.entry_id, str(channel_id))
 
     def get_state(self, channel_id: int) -> ChannelState:
         """Get/create channel state."""
@@ -100,9 +119,21 @@ class HikvisionEventHub:
         for callback in self._entity_listeners:
             callback(channel_id)
 
-    def _channel_delay(self, channel_id: int) -> int:
-        default_delay = int(self.entry.data.get(CONF_DEFAULT_OFF_DELAY_SECONDS, 30))
-        return self._off_delays.get(channel_id, default_delay)
+    @staticmethod
+    def _clamp_timeout(seconds: int) -> int:
+        return max(MIN_OFF_DELAY_SECONDS, min(MAX_OFF_DELAY_SECONDS, int(seconds)))
+
+    def get_channel_timeout(self, channel_id: int) -> int:
+        """Return timeout for one channel, falling back to global default."""
+        default_delay = int(
+            self.entry.data.get(CONF_DEFAULT_OFF_DELAY_SECONDS, DEFAULT_OFF_DELAY_SECONDS)
+        )
+        return self._timeouts.get(channel_id, self._clamp_timeout(default_delay))
+
+    async def async_set_channel_timeout(self, channel_id: int, seconds: int) -> None:
+        """Persist timeout and apply immediately."""
+        self._timeouts[channel_id] = self._clamp_timeout(seconds)
+        await self._timeout_store.async_save(self._timeouts)
 
     def _cancel_timer(self, state: ChannelState) -> None:
         if state.off_timer and not state.off_timer.cancelled():
@@ -122,7 +153,7 @@ class HikvisionEventHub:
         state = self.get_state(channel_id)
         self._cancel_timer(state)
 
-        delay = self._channel_delay(channel_id)
+        delay = self.get_channel_timeout(channel_id)
         if delay <= 0:
             return
 
@@ -176,9 +207,7 @@ def _parse_overrides(raw: str) -> dict[int, int]:
     overrides: dict[int, int] = {}
     for line in raw.splitlines():
         line = line.strip()
-        if not line:
-            continue
-        if "=" not in line:
+        if not line or "=" not in line:
             continue
         left, right = line.split("=", 1)
         try:
@@ -186,7 +215,7 @@ def _parse_overrides(raw: str) -> dict[int, int]:
             seconds = int(right.strip())
         except ValueError:
             continue
-        overrides[channel_id] = max(0, min(1800, seconds))
+        overrides[channel_id] = max(MIN_OFF_DELAY_SECONDS, min(MAX_OFF_DELAY_SECONDS, seconds))
     return overrides
 
 
@@ -194,7 +223,7 @@ def _parse_overrides(raw: str) -> dict[int, int]:
 class RuntimeData:
     """In-memory runtime objects for a config entry."""
 
-    hub: HikvisionEventHub
+    manager: ChannelManager
     client: HikvisionIsapiClient
     task: asyncio.Task | None = None
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -202,7 +231,7 @@ class RuntimeData:
 
 async def _run_stream(runtime: RuntimeData) -> None:
     """Maintain long-lived alertStream connection with reconnects."""
-    entry = runtime.hub.entry
+    entry = runtime.manager.entry
     reconnect_delay = int(
         entry.data.get(CONF_RECONNECT_DELAY_SECONDS, DEFAULT_RECONNECT_DELAY_SECONDS)
     )
@@ -210,7 +239,7 @@ async def _run_stream(runtime: RuntimeData) -> None:
     backoff = reconnect_delay
 
     async def _on_event(event: dict) -> None:
-        runtime.hub.process_event(event)
+        runtime.manager.process_event(event)
 
     while not runtime.stop_event.is_set():
         try:
@@ -229,6 +258,27 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate old config entries and channel override format."""
+    if config_entry.version > 2:
+        return False
+
+    if config_entry.version == 1:
+        overrides = _parse_overrides(
+            config_entry.data.get(CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES, "")
+        )
+        timeout_store = HikvisionChannelTimeoutStore(hass, config_entry.entry_id)
+        existing = await timeout_store.async_load()
+        existing.update(overrides)
+        await timeout_store.async_save(existing)
+
+        new_data = dict(config_entry.data)
+        new_data.pop(CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES, None)
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=2)
+
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hikvision ISAPI Events from UI config entry."""
     session = async_get_clientsession(hass)
@@ -240,11 +290,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         username=entry.data[CONF_USERNAME],
         password=entry.data[CONF_PASSWORD],
     )
-    hub = HikvisionEventHub(hass, entry)
-    runtime = RuntimeData(hub=hub, client=client)
+
+    timeout_store = HikvisionChannelTimeoutStore(hass, entry.entry_id)
+    stored_timeouts = await timeout_store.async_load()
+    if not stored_timeouts and entry.data.get(CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES):
+        stored_timeouts = _parse_overrides(entry.data[CONF_PER_CHANNEL_OFF_DELAY_OVERRIDES])
+        await timeout_store.async_save(stored_timeouts)
+
+    manager = ChannelManager(hass, entry, timeout_store, stored_timeouts)
+    runtime = RuntimeData(manager=manager, client=client)
+
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={manager.dvr_identifier},
+        manufacturer="Hikvision",
+        model="ISAPI Event Source",
+        name=f"Hikvision DVR {entry.data[CONF_HOST]}",
+    )
 
     channels = await discover_channels(client)
-    hub.add_discovered_channels(channels)
+    manager.add_discovered_channels(channels)
 
     runtime.task = hass.async_create_task(_run_stream(runtime))
 
@@ -262,7 +328,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     runtime: RuntimeData = hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
     runtime.stop_event.set()
-    runtime.hub.shutdown()
+    runtime.manager.shutdown()
     if runtime.task:
         runtime.task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

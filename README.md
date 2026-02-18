@@ -1,12 +1,26 @@
 # hikvision_isapi_events
 
-Home Assistant custom integration that subscribes to Hikvision ISAPI `alertStream` and creates event-driven binary sensors for each discovered channel:
+Home Assistant custom integration that subscribes to Hikvision ISAPI `alertStream` and creates event-driven entities grouped by **device-per-channel**.
+
+> Events only: no camera, stream, snapshot, or go2rtc management entities are created.
+
+## Device model in Home Assistant
+
+For each config entry:
+
+- One parent DVR device is created.
+- One child device is created per channel, named like:
+  - `Hikvision CH1`
+  - `Hikvision CH7`
+
+Each channel device contains 4 entities:
 
 - `binary_sensor.hikvision_chX_motion`
 - `binary_sensor.hikvision_chX_human`
 - `binary_sensor.hikvision_chX_vehicle`
+- `number.hikvision_chX_off_timeout`
 
-> No camera entities, no RTSP handling, and no snapshots are included.
+Channel devices are created from discovered channels and also lazily whenever a new `channelID` appears in incoming events.
 
 ## Install
 
@@ -22,27 +36,24 @@ Home Assistant custom integration that subscribes to Hikvision ISAPI `alertStrea
    - host, port, SSL
    - username and password
    - `default_off_delay_seconds` (0..1800)
-   - optional multiline `per_channel_off_delay_overrides` using `channel=seconds`
    - `reconnect_delay_seconds`
 
 Validation is done against `/ISAPI/System/deviceInfo`.
 
-## Where to find entities
+## Per-channel timeout number
 
-Entities are automatically created for discovered channels (or lazily as events arrive):
+`number.hikvision_chX_off_timeout` controls auto-off timeout per channel with:
 
-- `binary_sensor.hikvision_ch1_motion`
-- `binary_sensor.hikvision_ch1_human`
-- `binary_sensor.hikvision_ch1_vehicle`
-- etc.
+- Min: `0`
+- Max: `1800`
+- Step: `1`
 
-Each sensor includes attributes:
+Behavior:
 
-- `channel_id`
-- `last_event_datetime`
-- `last_event_state`
-- `last_target_type`
-- `last_event_type`
+- `0` = no timer-based auto-off (wait for explicit inactive event)
+- `> 0` = active events refresh timer; timer expiry turns all 3 binary sensors off
+
+Changes apply immediately and persist across restarts.
 
 ## Event behavior summary
 
@@ -51,13 +62,14 @@ Each sensor includes attributes:
   - motion turns ON
   - human turns ON when `targetType == human`
   - vehicle turns ON when `targetType == vehicle`
+  - OFF timer is scheduled/refreshed using the channel number value at event time
 - `eventState == inactive`
   - motion/human/vehicle all turn OFF immediately
+  - channel timer is canceled
 
-Per-channel off delay logic:
+## Migration notes
 
-- delay `0`: no timer auto-off, waits for inactive event
-- delay `> 0`: active events refresh a channel timer; timer expiry turns all three sensors off
+Existing config entries are preserved. If older entries used `per_channel_off_delay_overrides`, those values are migrated into per-channel persisted timeout storage on startup.
 
 ## Verify events with curl
 

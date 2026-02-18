@@ -26,7 +26,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up Hikvision binary sensors for an entry."""
     runtime = hass.data[DOMAIN][entry.entry_id][DATA_RUNTIME]
-    hub = runtime.hub
+    manager = runtime.manager
 
     entities: dict[tuple[int, str], HikvisionChannelBinarySensor] = {}
 
@@ -36,16 +36,16 @@ async def async_setup_entry(
             key = (channel_id, sensor_type)
             if key in entities:
                 continue
-            sensor = HikvisionChannelBinarySensor(hub, entry, channel_id, sensor_type)
+            sensor = HikvisionChannelBinarySensor(manager, entry, channel_id, sensor_type)
             entities[key] = sensor
             new_entities.append(sensor)
         if new_entities:
             async_add_entities(new_entities)
 
-    for channel_id in hub.channel_ids():
+    for channel_id in manager.channel_ids():
         _ensure_channel(channel_id)
 
-    hub.add_channel_listener(_ensure_channel)
+    manager.add_channel_listener(_ensure_channel)
 
 
 class HikvisionChannelBinarySensor(BinarySensorEntity):
@@ -53,8 +53,8 @@ class HikvisionChannelBinarySensor(BinarySensorEntity):
 
     _attr_should_poll = False
 
-    def __init__(self, hub, entry: ConfigEntry, channel_id: int, sensor_type: str) -> None:
-        self._hub = hub
+    def __init__(self, manager, entry: ConfigEntry, channel_id: int, sensor_type: str) -> None:
+        self._manager = manager
         self._entry = entry
         self._channel_id = channel_id
         self._sensor_type = sensor_type
@@ -66,9 +66,20 @@ class HikvisionChannelBinarySensor(BinarySensorEntity):
         self.entity_id = f"binary_sensor.hikvision_ch{channel_id}_{sensor_type}"
 
     @property
+    def device_info(self) -> dict:
+        """Attach channel entities to channel device, linked to DVR."""
+        return {
+            "identifiers": {self._manager.channel_identifier(self._channel_id)},
+            "name": f"Hikvision CH{self._channel_id}",
+            "manufacturer": "Hikvision",
+            "model": "ISAPI Channel",
+            "via_device": self._manager.dvr_identifier,
+        }
+
+    @property
     def is_on(self) -> bool:
         """Return the sensor state."""
-        state = self._hub.get_state(self._channel_id)
+        state = self._manager.get_state(self._channel_id)
         return {
             "motion": state.motion_on,
             "human": state.human_on,
@@ -78,7 +89,7 @@ class HikvisionChannelBinarySensor(BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict:
         """Return attributes for diagnostics."""
-        state = self._hub.get_state(self._channel_id)
+        state = self._manager.get_state(self._channel_id)
         return {
             ATTR_CHANNEL_ID: self._channel_id,
             ATTR_LAST_EVENT_DATETIME: state.last_event_datetime,
@@ -95,10 +106,10 @@ class HikvisionChannelBinarySensor(BinarySensorEntity):
                 return
             self.async_write_ha_state()
 
-        self._remove_listener = self._hub.add_state_listener(_update)
+        self._remove_listener = self._manager.add_state_listener(_update)
 
     async def async_will_remove_from_hass(self) -> None:
-        """Unsubscribe from hub."""
+        """Unsubscribe from manager."""
         if self._remove_listener:
             self._remove_listener()
             self._remove_listener = None
