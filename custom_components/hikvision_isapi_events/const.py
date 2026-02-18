@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "hikvision_isapi_events"
-PLATFORMS = ["binary_sensor"]
+PLATFORMS = ["binary_sensor", "number"]
 
 CONF_USE_SSL = "use_ssl"
 CONF_DEFAULT_OFF_DELAY_SECONDS = "default_off_delay_seconds"
@@ -35,3 +35,6 @@ ATTR_LAST_EVENT_DATETIME = "last_event_datetime"
 ATTR_LAST_EVENT_STATE = "last_event_state"
 ATTR_LAST_TARGET_TYPE = "last_target_type"
 ATTR_LAST_EVENT_TYPE = "last_event_type"
+
+DVR_DEVICE_KEY = "dvr"
+STORAGE_VERSION = 1
