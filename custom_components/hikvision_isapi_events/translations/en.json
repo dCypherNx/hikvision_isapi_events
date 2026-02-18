@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Hikvision ISAPI device",
+        "description": "Configure event stream connection and per-channel off delays.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "use_ssl": "Use SSL",
+          "username": "Username",
+          "password": "Password",
+          "default_off_delay_seconds": "Default off delay (seconds)",
+          "per_channel_off_delay_overrides": "Per-channel off delay overrides (one per line: channel=seconds)",
+          "reconnect_delay_seconds": "Initial reconnect delay (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the device using /ISAPI/System/deviceInfo.",
+      "invalid_delay": "Default off delay must be between 0 and 1800.",
+      "invalid_override_format": "Overrides must use one line per channel in the format channel=seconds (0..1800)."
+    },
+    "abort": {
+      "already_configured": "This Hikvision host is already configured."
+    }
+  }
+}
