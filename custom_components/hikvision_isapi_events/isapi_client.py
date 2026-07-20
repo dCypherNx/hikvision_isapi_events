@@ -140,7 +140,7 @@ class HikvisionIsapiClient:
         if not allow_retry_unauthorized:
             return response
 
-        await response.release()
+        response.release()
 
         retry_headers: dict[str, str] = {}
         retry_auth = self._digest.build_authorization(method, path)
